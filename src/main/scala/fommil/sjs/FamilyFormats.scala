@@ -2,9 +2,8 @@ package fommil.sjs
 
 import org.slf4j.LoggerFactory
 import scala.collection.immutable.ListMap
-
+import scala.reflect.ClassTag
 import spray.json._
-
 import shapeless._, labelled.{ field, FieldType }, syntax.singleton._
 
 /**
@@ -172,21 +171,24 @@ private[sjs] trait LowPriorityFamilyFormats
         deserError(s"missing $fieldName, found ${j.fields.keys.mkString(",")}")
 
       def readJsObject(j: JsObject) = {
-        val resolved: Value = (j.fields.get(fieldName), jfh.value) match {
+        val resolved: Value = (j.fields.get(fieldName), jfh.value, ph.nulls) match {
           // (None, _) means the value is missing in the wire format
-          case (None, f) if ph.nulls == NeverJsNull =>
+          case (None, f, NeverJsNull) =>
             f.read(JsNull)
 
-          case (None, f) if ph.nulls == AlwaysJsNull =>
+          case (None, f, d @ UseDefaultsJsNull()) =>
+            d.fieldDefaults.get(fieldName).fold(missingFieldError(j))(_.asInstanceOf[Value])
+
+          case (None, f, AlwaysJsNull) =>
             missingFieldError(j)
 
-          case (None, f: OptionFormat[_]) if ph.nulls == JsNullNotNone =>
+          case (None, f: OptionFormat[_], JsNullNotNone) =>
             None.asInstanceOf[Value]
 
-          case (Some(JsNull), f: OptionFormat[_]) if ph.nulls == JsNullNotNone =>
+          case (Some(JsNull), f: OptionFormat[_], JsNullNotNone) =>
             f.readSome(JsNull)
 
-          case (Some(value), f) =>
+          case (Some(value), f, _) =>
             f.read(value)
 
           case _ =>
@@ -359,6 +361,30 @@ trait JsonFormatHints {
    * is only possible with a user-defined `RootJsonFormat`.
    */
   sealed trait JsNullBehaviour
+  /** All values serialized to `JsNull` will be read using the class default parameter */
+  case class UseDefaultsJsNull[T]()(implicit ct: ClassTag[T]) extends JsNullBehaviour {
+    lazy val fieldDefaults: Map[String, Any] = {
+      import scala.reflect.runtime.currentMirror
+      import scala.reflect.runtime.universe._
+
+      val classSymbol = currentMirror.classSymbol(ct.runtimeClass)
+      val companionModuleSymbol = classSymbol.companion.asModule
+      val companionModule = currentMirror.reflectModule(companionModuleSymbol)
+      val companionMirror = currentMirror.reflect(companionModule.instance)
+      val companionTs = companionMirror.symbol.typeSignature
+      val applyMethod = companionTs.member(TermName("apply")).asMethod
+
+      applyMethod.paramLists.flatten.zipWithIndex.flatMap { case (symbol, i) =>
+        val defaultArg = companionTs.member(TermName("apply$default$" + (i + 1)))
+
+        if (defaultArg == NoSymbol) {
+          None
+        } else {
+          Some((symbol.name.toString, companionMirror.reflectMethod(defaultArg.asMethod)()))
+        }
+      }.toMap
+    }
+  }
   /** All values serialising to `JsNull` will be included in the wire format. Ambiguous. */
   case object AlwaysJsNull extends JsNullBehaviour
   /** Option values of `None` are omitted, but `Some` values of `JsNull` are retained. Default. */
@@ -370,6 +396,7 @@ trait JsonFormatHints {
     def nulls: JsNullBehaviour = JsNullNotNone
     def fieldName[Key <: Symbol](key: Key): String = key.name
   }
+
   implicit def productHint[T: Typeable] = new ProductHint[T] {}
 
 }

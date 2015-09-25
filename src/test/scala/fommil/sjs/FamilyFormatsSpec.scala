@@ -1,6 +1,7 @@
 package fommil.sjs
 
 import org.scalatest._
+import scala.reflect.ClassTag
 import spray.json._
 import shapeless._
 import java.util.UUID
@@ -13,6 +14,12 @@ package examples {
   case class Bar() extends SimpleTrait
   case object Baz extends SimpleTrait
   case class Faz(o: Option[String]) extends SimpleTrait
+
+  sealed trait BlarghTrait
+
+  case class Blargh(n: String, v: Int = 5) extends BlarghTrait
+  case class Blargh2(n1: String = "Hello", n2: String = "World") extends BlarghTrait
+  case class Blarg3(v: Int) extends BlarghTrait
 
   sealed trait SubTrait extends SimpleTrait
   case object Fuzz extends SubTrait
@@ -113,6 +120,12 @@ object ExamplesFormats extends DefaultJsonProtocol with FamilyFormats with LowPr
   }
 
   ///////////////////////////////////////////////
+  // user-defined default value rules
+  implicit object BlarghHint extends ProductHint[Blargh] {
+    override def nulls = UseDefaultsJsNull[Blargh]
+  }
+
+  ///////////////////////////////////////////////
   // user-defined /missing value rules
   implicit object HueyHint extends ProductHint[Huey] {
     override def nulls = AlwaysJsNull
@@ -179,6 +192,24 @@ class FamilyFormatsSpec extends FlatSpec with Matchers
   it should "support optional parameters on case classes" in {
     roundtrip(Faz(Some("meh")), """{"o":"meh"}""") // note uses optionFormat, not familyFormat
     roundtrip(Faz(None), "{}") // should be omitted, not "null"
+  }
+  
+  it should "support default parameters on case classes" in {
+    // shadow the default implicit conversion so we can define our own that uses UseDefaultsJsNull for every type
+    
+    val productHint = 0
+
+    implicit def useDefaultsHint[T: Typeable](implicit ct: ClassTag[T]): ProductHint[T] = new ProductHint[T] {
+      override def nulls = UseDefaultsJsNull[T]()
+    }
+
+    """{"n":"hello"}""".parseJson.convertTo[Blargh] shouldBe Blargh("hello")
+    """{"type":"Blargh", "n":"hello"}""".parseJson.convertTo[BlarghTrait] shouldBe Blargh("hello")
+    """{"type":"Blargh2"}""".parseJson.convertTo[BlarghTrait] shouldBe Blargh2()
+
+    intercept[DeserializationException] {
+      """{"type":"Blargh3"}""".parseJson.convertTo[BlarghTrait]
+    }
   }
 
   it should "fail when missing required fields" in {
